@@ -1,6 +1,7 @@
 from flask import Flask
 from threading import Thread
 
+# Este módulo solo conoce Flask y funciones registradas externamente.
 app = Flask(__name__)
 
 @app.get("/")
@@ -12,7 +13,6 @@ def health():
     return {"status": "ok"}, 200
 
 def _run():
-    # Replit expone el puerto automáticamente; Flask usa 0.0.0.0
     app.run(host="0.0.0.0", port=8080)
 
 def keep_alive():
