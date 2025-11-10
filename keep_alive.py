@@ -1,7 +1,6 @@
 from flask import Flask
 from threading import Thread
 
-# Este módulo solo conoce Flask y funciones registradas externamente.
 app = Flask(__name__)
 
 @app.get("/")
