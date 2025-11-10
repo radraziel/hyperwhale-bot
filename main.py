@@ -2,9 +2,9 @@ from keep_alive import keep_alive
 from hyper_alerts import run_bot, register_http_hooks
 
 if __name__ == "__main__":
-    # registra endpoints HTTP (ej. /snapshot) ANTES de arrancar Flask
+    # Registrar endpoints HTTP (ej. /health ya está en keep_alive, /snapshot se puede agregar si quieres)
     register_http_hooks()
-    # levanta el miniserver web para uptime robot y utilidades
+    # Levantar servidor Flask en puerto 8080 (Render lo detecta)
     keep_alive()
-    # arranca el loop del bot de alertas
+    # Iniciar loop principal del bot (alertas + lectura de comandos /start y /wallet)
     run_bot()
