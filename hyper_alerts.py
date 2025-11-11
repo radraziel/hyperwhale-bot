@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-import os, time, json, requests
+import os
+import time
+import json
+import requests
 from datetime import datetime, timezone, timedelta
+from flask import request
 
 # ============ CONFIG (por variables de entorno) ============
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -36,7 +40,6 @@ def load_state():
         "last_ts": 0,
         "seen_ids": [],
         "sent_raw_once": False,
-        "tg_offset": 0,  # offset para getUpdates de Telegram
     }
 
 def save_state(state):
@@ -176,11 +179,15 @@ def fetch_wallet_state_resilient(address: str):
                 coin = ap.get("coin") or ap.get("asset") or ap.get("symbol") or "?"
                 core = ap.get("position") or ap.get("perpPosition") or ap
 
-                szi_raw = core.get("szi") or core.get("size") or 0
+                szi_raw = core.get("szi") or core.get("size") or core.get("positionSize") or core.get("sz") or 0
                 try:
                     szi = float(szi_raw)
                 except Exception:
-                    szi = 0.0
+                    # si no se puede convertir pero no es "0", lo consideramos activo igualmente
+                    if str(szi_raw) not in ("0", "0.0", "", "None"):
+                        szi = szi_raw
+                    else:
+                        szi = 0.0
 
                 entry = core.get("entryPx") or core.get("entry") or core.get("entryPrice")
                 liq   = core.get("liqPx") or core.get("liquidationPx") or core.get("liq")
@@ -245,7 +252,13 @@ def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
     if wd is not None:
         lines.append(f"Withdrawable: {wd}")
 
-    pos = [p for p in wallet.get("positions", []) if p.get("szi") not in (0, 0.0, None)]
+    pos = []
+    for p in wallet.get("positions", []):
+        szi = p.get("szi")
+        if szi in (0, 0.0, None, "0", "0.0", ""):
+            continue
+        pos.append(p)
+
     if pos:
         lines.append("Posiciones activas:")
         for p in pos[:10]:
@@ -272,95 +285,56 @@ def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
             lines.append(f"• {emoji} {f['coin']} {f['sz']}@{f['px']} {ts}")
     return "\n".join(lines)
 
-# --------- Telegram: lectura de comandos (/start, /wallet) ---------
-def poll_telegram_commands(state: dict):
+# --------- Snapshot reutilizable ---------
+def send_wallet_snapshot(chat_id=None):
+    wallet = fetch_wallet_state_resilient(HL_TRADER_ADDRESS)
+    now = datetime.now(timezone.utc)
+    since_24h = int((now - timedelta(hours=24)).timestamp() * 1000)
+    fills24 = fetch_fills_resilient(HL_TRADER_ADDRESS, since_24h)
+    fills24.sort(key=lambda f: f.get("ts", 0) or 0, reverse=True)
+    top5 = fills24[:5]
+    msg_snap = build_wallet_snapshot(HL_TRADER_ADDRESS, wallet, top5)
+    send_telegram(msg_snap, chat_id=chat_id)
+
+# --------- Manejo de webhook de Telegram ---------
+def handle_telegram_update(update: dict):
     """
-    Lee updates desde Telegram y maneja:
-      /start  -> status general
-      /wallet -> snapshot manual
-    Solo responde en el chat TELEGRAM_CHAT_ID (si está definido).
+    Procesa un update recibido vía webhook de Telegram.
+    Soporta:
+      /start
+      /wallet
     """
-    if not TELEGRAM_TOKEN:
-        return state
-    tg_offset = int(state.get("tg_offset", 0))
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    params = {"timeout": 0}
-    if tg_offset:
-        params["offset"] = tg_offset
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    text = (msg.get("text") or "").strip()
 
-    try:
-        r = requests.get(url, params=params, timeout=20)
-        if not r.ok:
-            print("⚠️ getUpdates error:", r.status_code, r.text[:200])
-            return state
-        data = r.json()
-        if not data.get("ok"):
-            print("⚠️ getUpdates not ok:", data)
-            return state
+    if not text.startswith("/"):
+        return
 
-        result = data.get("result", [])
-        if not result:
-            return state
+    text_lower = text.lower()
+    if text_lower.startswith("/start"):
+        send_telegram(
+            f"👋 HyperWhaleBot activo.\n"
+            f"Monitoreando: `{HL_TRADER_ADDRESS}`\n"
+            f"Intervalo: {POLL_SECONDS}s\n\n"
+            f"Comandos:\n"
+            f"• /wallet – snapshot manual de la cartera\n",
+            chat_id=chat_id,
+        )
+    elif text_lower.startswith("/wallet"):
+        send_wallet_snapshot(chat_id=chat_id)
 
-        try:
-            target_chat = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
-        except Exception:
-            target_chat = None
-
-        for upd in result:
-            upd_id = upd.get("update_id")
-            if upd_id is not None and upd_id >= tg_offset:
-                tg_offset = upd_id + 1
-
-            msg = upd.get("message") or upd.get("edited_message")
-            if not msg:
-                continue
-
-            chat = msg.get("chat", {})
-            chat_id = chat.get("id")
-            text = msg.get("text", "") or ""
-
-            # si definimos TELEGRAM_CHAT_ID, limitamos comandos a ese chat
-            if target_chat is not None and chat_id != target_chat:
-                # ignorar pero avanzar offset
-                continue
-
-            text_lower = text.strip().lower()
-            if text_lower.startswith("/start"):
-                send_telegram(
-                    f"👋 HyperWhaleBot activo.\n"
-                    f"Monitoreando: `{HL_TRADER_ADDRESS}`\n"
-                    f"Intervalo: {POLL_SECONDS}s\n\n"
-                    f"Comandos:\n"
-                    f"• /wallet – snapshot manual de la cartera\n",
-                    chat_id=chat_id,
-                )
-            elif text_lower.startswith("/wallet"):
-                # snapshot manual
-                wallet = fetch_wallet_state_resilient(HL_TRADER_ADDRESS)
-                now = datetime.now(timezone.utc)
-                since_24h = int((now - timedelta(hours=24)).timestamp() * 1000)
-                fills24 = fetch_fills_resilient(HL_TRADER_ADDRESS, since_24h)
-                fills24.sort(key=lambda f: f.get("ts", 0) or 0, reverse=True)
-                top5 = fills24[:5]
-                msg_snap = build_wallet_snapshot(HL_TRADER_ADDRESS, wallet, top5)
-                send_telegram(msg_snap, chat_id=chat_id)
-
-        state["tg_offset"] = tg_offset
-        return state
-
-    except Exception as e:
-        print("❌ Error poll_telegram_commands:", e)
-        return state
-
-# --------- Loop principal: alertas + comandos ---------
+# --------- Loop principal: solo alertas automáticas ---------
 def run_bot():
     if not TELEGRAM_TOKEN or not HL_TRADER_ADDRESS:
         print("❌ Faltan TELEGRAM_TOKEN o HL_TRADER_ADDRESS.")
         return
 
-    print("✅ Iniciando bot HyperWhaleBot (rate-safe + comandos)…")
+    print("✅ Iniciando bot HyperWhaleBot (rate-safe + comandos por webhook)…")
     if TELEGRAM_CHAT_ID:
         send_telegram("👋 Bot iniciado. Monitoreo activo del trader en Hyperliquid.")
 
@@ -371,7 +345,6 @@ def run_bot():
 
     while True:
         try:
-            # 1) Alertas por fills nuevos
             fills = fetch_fills_resilient(HL_TRADER_ADDRESS, last_ts)
             new_items = []
             if fills:
@@ -402,11 +375,9 @@ def run_bot():
                     for f in new_items:
                         send_telegram(build_fill_message(HL_TRADER_ADDRESS, f))
 
-            # 2) Leer comandos de Telegram (/start, /wallet)
             state["last_ts"] = int(last_ts)
             state["seen_ids"] = list(seen_ids)[-MAX_SEEN_IDS:]
             state["sent_raw_once"] = sent_raw_once
-            state = poll_telegram_commands(state)
             save_state(state)
 
         except Exception as e:
@@ -414,16 +385,32 @@ def run_bot():
 
         time.sleep(POLL_SECONDS)
 
-# --------- Hooks HTTP opcionales (por ahora solo /health en keep_alive) ---------
+# --------- Hooks HTTP: webhook + snapshot + ping ---------
 def register_http_hooks():
-    # Si en el futuro quieres volver a exponer /snapshot vía navegador,
-    # aquí se pueden registrar rutas extra usando keep_alive.app
     try:
         from keep_alive import app
     except Exception as e:
         print("⚠️ No pude registrar hooks HTTP extra:", e)
         return
-    # Ejemplo: podríamos registrar /ping si quisieras:
+
+    @app.post("/telegram-webhook")
+    def telegram_webhook():
+        try:
+            update = request.get_json(force=True, silent=True) or {}
+            handle_telegram_update(update)
+            return {"ok": True}, 200
+        except Exception as e:
+            print("❌ Error en telegram_webhook:", e)
+            return {"ok": False, "error": str(e)}, 500
+
+    @app.get("/snapshot")
+    def snapshot():
+        try:
+            send_wallet_snapshot()
+            return {"ok": True}, 200
+        except Exception as e:
+            return {"ok": False, "error": str(e)}, 500
+
     @app.get("/ping")
     def ping():
         return {"pong": True}, 200
