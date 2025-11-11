@@ -26,7 +26,7 @@ MAX_SEEN_IDS             = 500   # anti-duplicados
 _last_send_ts = 0.0
 
 
-# ===================== UTILIDADES DE TIEMPO =====================
+# ===================== UTILIDADES DE TIEMPO Y NÚMEROS =====================
 def ts_to_local_str(ts, with_seconds=False):
     """Convierte timestamp a string ajustando TIME_OFFSET_HOURS."""
     t = float(ts)
@@ -39,6 +39,24 @@ def ts_to_local_str(ts, with_seconds=False):
 
 def fmt_time(ts):
     return ts_to_local_str(ts, with_seconds=True)
+
+
+def fmt_num(x, decimals=2):
+    """Formatea número con comas y N decimales. Si no es número, devuelve str(x)."""
+    try:
+        v = float(x)
+        return f"{v:,.{decimals}f}"
+    except Exception:
+        return str(x)
+
+
+def fmt_pct(x, decimals=2):
+    """Convierte un valor tipo 0.1859 a '18.59%'."""
+    try:
+        v = float(x) * 100.0
+        return f"{v:,.{decimals}f}%"
+    except Exception:
+        return str(x)
 
 
 # ===================== ESTADO LOCAL =====================
@@ -265,7 +283,7 @@ def fetch_wallet_state_resilient(address):
     return {"equity": None, "withdrawable": None, "positions": []}
 
 
-# ===================== FORMATEADORES =====================
+# ===================== FORMATEADORES DE MENSAJE =====================
 def build_fill_message(addr, f):
     lines = ["⚡ Actividad detectada", "Trader: `{}`".format(addr)]
     if f.get("ts"):
@@ -299,9 +317,9 @@ def build_wallet_snapshot(addr, wallet, fills24_top5):
     eq = wallet.get("equity")
     wd = wallet.get("withdrawable")
     if eq is not None:
-        lines.append("Equity: {}".format(eq))
+        lines.append("Equity: {}".format(fmt_num(eq)))
     if wd is not None:
-        lines.append("Withdrawable: {}".format(wd))
+        lines.append("Withdrawable: {}".format(fmt_num(wd)))
 
     pos = []
     for p in wallet.get("positions", []):
@@ -314,14 +332,15 @@ def build_wallet_snapshot(addr, wallet, fills24_top5):
     if pos:
         lines.append("Posiciones activas:")
         for p in pos[:10]:
+            szi_fmt   = fmt_num(p.get("szi"), 3)
+            pv_fmt    = fmt_num(p.get("pos_value", 0), 2)
+            entry_fmt = fmt_num(p.get("entry"), 2)
+            liq_fmt   = fmt_num(p.get("liq"), 2)
+            roe_val   = p.get("roe")
+            roe_fmt   = fmt_pct(roe_val) if roe_val is not None else "-"
             lines.append(
                 "• {}: szi={} posValue={} entry={} liq={} ROE={}".format(
-                    p.get("coin", "?"),
-                    p.get("szi"),
-                    p.get("pos_value", 0),
-                    p.get("entry"),
-                    p.get("liq"),
-                    p.get("roe"),
+                    p.get("coin", "?"), szi_fmt, pv_fmt, entry_fmt, liq_fmt, roe_fmt
                 )
             )
         if len(pos) > 10:
