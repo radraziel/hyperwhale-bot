@@ -1,3 +1,15 @@
+{ "type": "clearinghouseState", "user": "0x..." }
+```  [oai_citation:0‡Chainstack](https://docs.chainstack.com/reference/hyperliquid-info-clearinghousestate?utm_source=chatgpt.com)  
+
+Te dejo a continuación **`hyper_alerts.py` COMPLETO y CORREGIDO**:
+
+- Usa `type: "clearinghouseState"` en todas las llamadas de wallet.
+- Extrae bien el `coin` desde `position.coin`.
+- Mantiene `/start`, `/wallet` y el nuevo `/walletdebug`.
+
+Copia/pega TODO el archivo en GitHub y reemplaza el actual:
+
+```python
 #!/usr/bin/env python3
 import os
 import time
@@ -175,9 +187,8 @@ def fetch_fills_resilient(address: str, since_ts: int | None) -> list[dict]:
 
 def fetch_wallet_state_resilient(address: str) -> dict:
     """
-    Usa el tipo 'wallet' de Hyperliquid.
-    Esperamos algo como: { marginSummary, withdrawable, assetPositions, time, ... }
-    Devolvemos:
+    Usa el tipo 'clearinghouseState' de Hyperliquid.
+    Devuelve:
       {
         "equity": float|None,
         "withdrawable": float|None,
@@ -188,7 +199,8 @@ def fetch_wallet_state_resilient(address: str) -> dict:
     """
     errors = []
     try:
-        r = _post_json(HL_INFO_URL, {"type": "wallet", "user": address})
+        # 👇 tipo correcto según docs: clearinghouseState
+        r = _post_json(HL_INFO_URL, {"type": "clearinghouseState", "user": address})
         if not r.ok:
             errors.append(f"wallet: HTTP {r.status_code} -> {r.text[:200]}")
         else:
@@ -209,8 +221,9 @@ def fetch_wallet_state_resilient(address: str) -> dict:
             positions = []
 
             for ap in raw_pos:
-                coin = ap.get("coin") or ap.get("asset") or ap.get("symbol") or "?"
+                # estructura docs: {"position": {...}, "type": "..."}
                 core = ap.get("position") or ap.get("perpPosition") or ap
+                coin = core.get("coin") or ap.get("coin") or ap.get("asset") or ap.get("symbol") or "?"
 
                 # tamaño
                 szi_raw = (
@@ -239,7 +252,7 @@ def fetch_wallet_state_resilient(address: str) -> dict:
 
                 entry = core.get("entryPx") or core.get("entry") or core.get("entryPrice")
                 liq   = core.get("liqPx") or core.get("liquidationPx") or core.get("liq")
-                roe_raw = core.get("roe") or core.get("ROE")
+                roe_raw = core.get("returnOnEquity") or core.get("roe") or core.get("ROE")
                 try:
                     roe = float(roe_raw) if roe_raw is not None else None
                 except Exception:
@@ -356,7 +369,7 @@ def send_wallet_debug(chat_id: int | str | None = None) -> None:
     para ver exactamente qué campos devuelve Hyperliquid.
     """
     try:
-        r = _post_json(HL_INFO_URL, {"type": "wallet", "user": HL_TRADER_ADDRESS})
+        r = _post_json(HL_INFO_URL, {"type": "clearinghouseState", "user": HL_TRADER_ADDRESS})
         if not r.ok:
             send_telegram(f"walletdebug HTTP {r.status_code}: {r.text[:200]}", chat_id=chat_id)
             return
