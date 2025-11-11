@@ -332,15 +332,15 @@ def build_wallet_snapshot(addr, wallet, fills24_top5):
     if pos:
         lines.append("Posiciones activas:")
         for p in pos[:10]:
-            szi_fmt   = fmt_num(p.get("szi"), 3)
-            pv_fmt    = fmt_num(p.get("pos_value", 0), 2)
-            entry_fmt = fmt_num(p.get("entry"), 2)
-            liq_fmt   = fmt_num(p.get("liq"), 2)
-            roe_val   = p.get("roe")
-            roe_fmt   = fmt_pct(roe_val) if roe_val is not None else "-"
+            cantidad   = fmt_num(p.get("szi"), 3)
+            valor_pos  = fmt_num(p.get("pos_value", 0), 2)
+            precio_ent = fmt_num(p.get("entry"), 2)
+            precio_liq = fmt_num(p.get("liq"), 2)
+            roe_val    = p.get("roe")
+            roe_fmt    = fmt_pct(roe_val) if roe_val is not None else "-"
             lines.append(
-                "• {}: szi={} posValue={} entry={} liq={} ROE={}".format(
-                    p.get("coin", "?"), szi_fmt, pv_fmt, entry_fmt, liq_fmt, roe_fmt
+                "• {}: Cantidad={} Valor de Posición={} Precio de Entrada={} Precio de Liquidación={} ROE={}".format(
+                    p.get("coin", "?"), cantidad, valor_pos, precio_ent, precio_liq, roe_fmt
                 )
             )
         if len(pos) > 10:
