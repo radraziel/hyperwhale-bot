@@ -11,9 +11,12 @@ TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "").strip()  # grupo para alertas
 HL_TRADER_ADDRESS   = os.getenv("HL_TRADER_ADDRESS", "").strip()
 
-POLL_SECONDS        = int(os.getenv("POLL_SECONDS", "30"))  # frecuencia de consulta HL
+POLL_SECONDS        = int(os.getenv("POLL_SECONDS", "30"))       # frecuencia de consulta HL
 STATE_FILE          = "state.json"
 HL_INFO_URL         = "https://api.hyperliquid.xyz/info"
+
+# Offset horario (ej. -6 para CDMX si la API está en UTC)
+TIME_OFFSET_HOURS   = int(os.getenv("TIME_OFFSET_HOURS", "0"))
 
 # Control de envíos a Telegram
 MIN_SECONDS_BETWEEN_MSGS = 1.2   # throttle (~1 msg/seg)
@@ -22,13 +25,27 @@ MAX_SEEN_IDS             = 500   # anti-duplicados
 # ===========================================================
 _last_send_ts = 0.0
 
-def fmt_time(ts):
-    t = int(ts)
-    if t > 10_000_000_000:  # milisegundos
-        t = t / 1000
-    return datetime.fromtimestamp(t, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-# --------- Estado local (persistente en state.json) ----------
+# ===================== UTILIDADES DE TIEMPO =====================
+def ts_to_local_str(ts, with_seconds=False):
+    """
+    Convierte un timestamp (segundos o milisegundos desde epoch)
+    a string ajustado por TIME_OFFSET_HOURS.
+    """
+    t = float(ts)
+    if t > 10_000_000_000:  # milisegundos
+        t = t / 1000.0
+    dt = datetime.fromtimestamp(t, tz=timezone.utc) + timedelta(hours=TIME_OFFSET_HOURS)
+    fmt = "%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M"
+    return dt.strftime(fmt)
+
+
+def fmt_time(ts):
+    # usamos la misma función pero con segundos
+    return ts_to_local_str(ts, with_seconds=True)
+
+
+# ===================== ESTADO LOCAL =====================
 def load_state():
     try:
         if os.path.exists(STATE_FILE):
@@ -42,6 +59,7 @@ def load_state():
         "sent_raw_once": False,
     }
 
+
 def save_state(state):
     try:
         with open(STATE_FILE, "w") as f:
@@ -49,7 +67,8 @@ def save_state(state):
     except Exception as e:
         print("⚠️ No pude guardar estado:", e)
 
-# --------- Telegram: enviar mensajes / throttle / 429 ---------
+
+# ===================== TELEGRAM (ENVÍO) =====================
 def _sleep_until_next_slot():
     global _last_send_ts
     now = time.time()
@@ -57,6 +76,7 @@ def _sleep_until_next_slot():
     if elapsed < MIN_SECONDS_BETWEEN_MSGS:
         time.sleep(MIN_SECONDS_BETWEEN_MSGS - elapsed)
     _last_send_ts = time.time()
+
 
 def send_telegram(text: str, chat_id: str | int | None = None, max_retries: int = 3):
     if not TELEGRAM_TOKEN:
@@ -93,9 +113,11 @@ def send_telegram(text: str, chat_id: str | int | None = None, max_retries: int 
             time.sleep(2)
             attempt += 1
 
-# --------- Hyperliquid: normalizadores y fetch ---------
+
+# ===================== HYPERLIQUID: FETCH =====================
 def _post_json(url, payload):
     return requests.post(url, json=payload, timeout=30, headers={"Content-Type": "application/json"})
+
 
 def _normalize_fill(fill: dict):
     coin = fill.get("coin") or fill.get("symbol") or fill.get("asset") or "?"
@@ -105,6 +127,7 @@ def _normalize_fill(fill: dict):
     tid  = fill.get("tid") or fill.get("tradeId") or fill.get("id")
     ts   = fill.get("timestamp") or fill.get("ts") or fill.get("time") or 0
     return {"coin": coin, "side": side, "px": px, "sz": sz, "tid": tid, "ts": ts, "_raw": fill}
+
 
 def fetch_fills_resilient(address: str, since_ts: int | None):
     trials = [
@@ -134,7 +157,8 @@ def fetch_fills_resilient(address: str, since_ts: int | None):
                         errors.append(f"{label}: dict sin lista usable")
                         continue
                 else:
-                    errors.append(f"{label}: tipo no soportado: {type(data)}"); continue
+                    errors.append(f"{label}: tipo no soportado: {type(data)}")
+                    continue
 
                 fills = [_normalize_fill(x) for x in raw]
                 if since_ts and since_ts > 0:
@@ -148,10 +172,19 @@ def fetch_fills_resilient(address: str, since_ts: int | None):
         print("❌ fetch_fills_resilient falló:", " | ".join(errors))
     return []
 
+
 def fetch_wallet_state_resilient(address: str):
     """
     Usa el tipo 'wallet' de Hyperliquid.
     Esperamos algo como: { marginSummary, withdrawable, assetPositions, time, ... }
+    Devolvemos:
+      {
+        "equity": float|None,
+        "withdrawable": float|None,
+        "positions": [
+          {"coin","szi","entry","liq","roe","pos_value"}
+        ]
+      }
     """
     errors = []
     try:
@@ -179,15 +212,30 @@ def fetch_wallet_state_resilient(address: str):
                 coin = ap.get("coin") or ap.get("asset") or ap.get("symbol") or "?"
                 core = ap.get("position") or ap.get("perpPosition") or ap
 
-                szi_raw = core.get("szi") or core.get("size") or core.get("positionSize") or core.get("sz") or 0
+                # tamaño
+                szi_raw = (
+                    core.get("szi")
+                    or core.get("size")
+                    or core.get("positionSize")
+                    or core.get("sz")
+                    or 0
+                )
                 try:
                     szi = float(szi_raw)
                 except Exception:
-                    # si no se puede convertir pero no es "0", lo consideramos activo igualmente
-                    if str(szi_raw) not in ("0", "0.0", "", "None"):
-                        szi = szi_raw
-                    else:
-                        szi = 0.0
+                    szi = szi_raw  # si no se puede convertir, lo dejamos tal cual
+
+                # valor de posición (USD)
+                pos_val_raw = (
+                    core.get("positionValue")
+                    or ap.get("positionValue")
+                    or core.get("posValue")
+                    or 0
+                )
+                try:
+                    pos_value = float(pos_val_raw)
+                except Exception:
+                    pos_value = 0.0
 
                 entry = core.get("entryPx") or core.get("entry") or core.get("entryPrice")
                 liq   = core.get("liqPx") or core.get("liquidationPx") or core.get("liq")
@@ -203,6 +251,7 @@ def fetch_wallet_state_resilient(address: str):
                     "entry": entry,
                     "liq": liq,
                     "roe": roe,
+                    "pos_value": pos_value,
                 })
 
             return {
@@ -218,7 +267,8 @@ def fetch_wallet_state_resilient(address: str):
         print("❌ fetch_wallet_state_resilient falló:", " | ".join(errors))
     return {"equity": None, "withdrawable": None, "positions": []}
 
-# --------- Formateadores de mensajes ---------
+
+# ===================== FORMATEADORES =====================
 def build_fill_message(addr: str, f: dict):
     lines = ["⚡ Actividad detectada", f"Trader: `{addr}`"]
     if f.get("ts"):
@@ -233,6 +283,7 @@ def build_fill_message(addr: str, f: dict):
         lines.append(f"tradeId: {f['tid']}")
     return "\n".join(lines)
 
+
 def build_fills_summary(addr: str, fills: list):
     fills_sorted = sorted(fills, key=lambda x: x.get("ts", 0) or 0)
     lines = [f"📬 {len(fills_sorted)} eventos nuevos del trader `{addr}`"]
@@ -242,6 +293,7 @@ def build_fills_summary(addr: str, fills: list):
     if len(fills_sorted) > 5:
         lines.append(f"… y {len(fills_sorted) - 5} más.")
     return "\n".join(lines)
+
 
 def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
     lines = [f"🔎 Wallet: `{addr}`"]
@@ -255,7 +307,9 @@ def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
     pos = []
     for p in wallet.get("positions", []):
         szi = p.get("szi")
-        if szi in (0, 0.0, None, "0", "0.0", ""):
+        pos_value = p.get("pos_value", 0) or 0
+        # activa si tamaño != 0 o valor > 0
+        if szi in (0, 0.0, None, "0", "0.0", "") and pos_value == 0:
             continue
         pos.append(p)
 
@@ -265,6 +319,7 @@ def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
             lines.append(
                 f"• {p.get('coin','?')}: "
                 f"szi={p.get('szi')} "
+                f"posValue={p.get('pos_value', 0)} "
                 f"entry={p.get('entry')} "
                 f"liq={p.get('liq')} "
                 f"ROE={p.get('roe')}"
@@ -277,15 +332,13 @@ def build_wallet_snapshot(addr: str, wallet: dict, fills24_top5: list):
     if fills24_top5:
         lines.append("Fills 24h (top 5):")
         for f in fills24_top5:
-            ts = datetime.fromtimestamp(
-                (f["ts"] / 1000) if f["ts"] > 10_000_000_000 else f["ts"],
-                tz=timezone.utc,
-            ).strftime("%Y-%m-%d %H:%MZ")
+            ts = ts_to_local_str(f.get("ts", 0) or 0, with_seconds=False)
             emoji = "🟢" if (f["side"].startswith("B") or f["side"] == "BUY") else "🔴"
             lines.append(f"• {emoji} {f['coin']} {f['sz']}@{f['px']} {ts}")
     return "\n".join(lines)
 
-# --------- Snapshot reutilizable ---------
+
+# ===================== SNAPSHOT REUTILIZABLE =====================
 def send_wallet_snapshot(chat_id=None):
     wallet = fetch_wallet_state_resilient(HL_TRADER_ADDRESS)
     now = datetime.now(timezone.utc)
@@ -296,7 +349,8 @@ def send_wallet_snapshot(chat_id=None):
     msg_snap = build_wallet_snapshot(HL_TRADER_ADDRESS, wallet, top5)
     send_telegram(msg_snap, chat_id=chat_id)
 
-# --------- Manejo de webhook de Telegram ---------
+
+# ===================== TELEGRAM WEBHOOK =====================
 def handle_telegram_update(update: dict):
     """
     Procesa un update recibido vía webhook de Telegram.
@@ -328,7 +382,8 @@ def handle_telegram_update(update: dict):
     elif text_lower.startswith("/wallet"):
         send_wallet_snapshot(chat_id=chat_id)
 
-# --------- Loop principal: solo alertas automáticas ---------
+
+# ===================== LOOP PRINCIPAL (ALERTAS) =====================
 def run_bot():
     if not TELEGRAM_TOKEN or not HL_TRADER_ADDRESS:
         print("❌ Faltan TELEGRAM_TOKEN o HL_TRADER_ADDRESS.")
@@ -385,7 +440,8 @@ def run_bot():
 
         time.sleep(POLL_SECONDS)
 
-# --------- Hooks HTTP: webhook + snapshot + ping ---------
+
+# ===================== HOOKS HTTP (Flask) =====================
 def register_http_hooks():
     try:
         from keep_alive import app
