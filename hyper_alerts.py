@@ -350,6 +350,45 @@ def send_wallet_snapshot(chat_id=None):
     send_telegram(msg_snap, chat_id=chat_id)
 
 
+def send_wallet_debug(chat_id=None):
+    """
+    Comando de depuración: envía el JSON crudo del wallet (o al menos assetPositions)
+    para ver exactamente qué campos devuelve Hyperliquid.
+    """
+    try:
+        r = _post_json(HL_INFO_URL, {"type": "wallet", "user": HL_TRADER_ADDRESS})
+        if not r.ok:
+            send_telegram(f"walletdebug HTTP {r.status_code}: {r.text[:200]}", chat_id=chat_id)
+            return
+
+        data = r.json()
+        # Nos interesa sobre todo assetPositions
+        if isinstance(data, dict):
+            payload = {
+                "marginSummary": data.get("marginSummary"),
+                "withdrawable": data.get("withdrawable"),
+                "assetPositions": data.get("assetPositions"),
+            }
+        elif isinstance(data, list) and data:
+            d = data[0]
+            payload = {
+                "marginSummary": d.get("marginSummary"),
+                "withdrawable": d.get("withdrawable"),
+                "assetPositions": d.get("assetPositions"),
+            }
+        else:
+            payload = {"raw": data}
+
+        text = json.dumps(payload, indent=2)
+        # Telegram tiene límite ~4096 chars, recortamos por si acaso
+        if len(text) > 3500:
+            text = text[:3500] + "\n...(truncado)..."
+
+        send_telegram("📦 walletdebug:\n" + text, chat_id=chat_id)
+    except Exception as e:
+        send_telegram(f"walletdebug error: {e}", chat_id=chat_id)
+
+
 # ===================== TELEGRAM WEBHOOK =====================
 def handle_telegram_update(update: dict):
     """
@@ -357,6 +396,7 @@ def handle_telegram_update(update: dict):
     Soporta:
       /start
       /wallet
+      /walletdebug
     """
     msg = update.get("message") or update.get("edited_message")
     if not msg:
@@ -376,9 +416,12 @@ def handle_telegram_update(update: dict):
             f"Monitoreando: `{HL_TRADER_ADDRESS}`\n"
             f"Intervalo: {POLL_SECONDS}s\n\n"
             f"Comandos:\n"
-            f"• /wallet – snapshot manual de la cartera\n",
+            f"• /wallet – snapshot manual de la cartera\n"
+            f"• /walletdebug – info cruda de la cartera (debug)\n",
             chat_id=chat_id,
         )
+    elif text_lower.startswith("/walletdebug"):
+        send_wallet_debug(chat_id=chat_id)
     elif text_lower.startswith("/wallet"):
         send_wallet_snapshot(chat_id=chat_id)
 
@@ -463,7 +506,7 @@ def register_http_hooks():
     def snapshot():
         try:
             send_wallet_snapshot()
-            return {"ok": True}, 200
+        return {"ok": True}, 200
         except Exception as e:
             return {"ok": False, "error": str(e)}, 500
 
